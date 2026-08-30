@@ -6,8 +6,7 @@ on:
       - main
   workflow_dispatch:
 
-permissions:
-  issues: write
+permissions: {}
 
 concurrency:
   group: namecheap-api-health
@@ -103,75 +102,14 @@ jobs:
             echo "detail=${detail}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Open or update health issue
-        if: always()
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      - name: Report healthy check
+        if: steps.health.outputs.status == 'healthy'
         env:
-          HEALTH_STATUS: ${{ steps.health.outputs.status }}
           EGRESS_IPV4: ${{ steps.health.outputs.egress_ipv4 }}
-          NAMECHEAP_REPORTED_IPV4: ${{ steps.health.outputs.namecheap_reported_ipv4 }}
           HEALTH_DETAIL: ${{ steps.health.outputs.detail }}
-        with:
-          script: |
-            const marker = '<!-- namecheap-api-health -->';
-            const status = process.env.HEALTH_STATUS || 'failed';
-            const egressIpv4 = process.env.EGRESS_IPV4 || 'unknown';
-            const namecheapReportedIpv4 = process.env.NAMECHEAP_REPORTED_IPV4;
-            const detail = process.env.HEALTH_DETAIL || 'No health-check detail was captured.';
-            const { owner, repo } = context.repo;
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner,
-              repo,
-              state: 'all',
-              per_page: 100,
-            });
-            const matchingIssues = issues.filter((issue) =>
-              !issue.pull_request && issue.body?.includes(marker),
-            );
-
-            if (status === 'healthy') {
-              await Promise.all(matchingIssues
-                .filter((issue) => issue.state === 'open')
-                .map((issue) => github.rest.issues.update({
-                  owner,
-                  repo,
-                  issue_number: issue.number,
-                  state: 'closed',
-                  state_reason: 'completed',
-                })));
-              return;
-            }
-
-            const body = [
-              marker,
-              '## Namecheap API health check failed',
-              '',
-              `- curl -4 observed IPv4: \`${egressIpv4}\``,
-              ...(namecheapReportedIpv4 ? [`- Namecheap-reported IPv4: \`${namecheapReportedIpv4}\``] : []),
-              `- Detail: ${detail}`,
-              '',
-              'This alert performs a read-only API check. It does not change Namecheap DNS, the API allowlist, or credentials.',
-            ].join('\n');
-            const title = 'Namecheap API health check failed';
-            const existing = matchingIssues.sort((left, right) => left.number - right.number)[0];
-
-            if (existing) {
-              await github.rest.issues.update({
-                owner,
-                repo,
-                issue_number: existing.number,
-                state: 'open',
-                title,
-                body,
-              });
-            } else {
-              await github.rest.issues.create({
-                owner,
-                repo,
-                title,
-                body,
-              });
-            }
+        run: |
+          echo "curl -4 observed IPv4: ${EGRESS_IPV4:-unknown}"
+          echo "$HEALTH_DETAIL"
 
       - name: Fail unhealthy check
         if: steps.health.outputs.status != 'healthy'
