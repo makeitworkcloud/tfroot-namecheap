@@ -44,28 +44,36 @@ jobs:
           detail='Namecheap API request did not complete.'
           egress_ipv4=''
 
-          if [ -z "${NAMECHEAP_API_KEY:-}" ]; then
+          for endpoint in https://ifconfig.me/ip https://checkip.amazonaws.com; do
+            candidate="$(curl -4 --fail --silent --show-error --max-time 10 "$endpoint" | tr -d '\r\n')" || continue
+            if is_ipv4 "$candidate"; then
+              egress_ipv4="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$egress_ipv4" ]; then
+            detail='Could not determine a valid IPv4 egress address.'
+          elif [ -z "${NAMECHEAP_API_KEY:-}" ]; then
             detail='NAMECHEAP_API_KEY is unavailable to this workflow.'
           else
-            for endpoint in https://ifconfig.me/ip https://checkip.amazonaws.com; do
-              candidate="$(curl -4 --fail --silent --show-error --max-time 10 "$endpoint" | tr -d '\r\n')" || continue
-              if is_ipv4 "$candidate"; then
-                egress_ipv4="$candidate"
-                break
-              fi
-            done
+            escaped_api_key=${NAMECHEAP_API_KEY//\\/\\\\}
+            escaped_api_key=${escaped_api_key//\"/\\\"}
+            escaped_api_key=${escaped_api_key//$'\r'/\\r}
+            escaped_api_key=${escaped_api_key//$'\n'/\\n}
 
-            if [ -z "$egress_ipv4" ]; then
-              detail='Could not determine a valid IPv4 egress address.'
-            elif curl -4 --fail --silent --show-error --max-time 20 --get \
-              --data-urlencode 'ApiUser=makeitworkcloud' \
-              --data-urlencode "ApiKey=${NAMECHEAP_API_KEY}" \
-              --data-urlencode 'UserName=makeitworkcloud' \
-              --data-urlencode "ClientIp=${egress_ipv4}" \
-              --data-urlencode 'Command=namecheap.users.getPricing' \
-              --data-urlencode 'ProductType=DOMAIN' \
-              https://api.namecheap.com/xml.response \
-              --output "$response_file"; then
+            # Keep the API key out of process arguments by passing curl options on stdin.
+            if {
+              printf '%s\n' \
+                'url = "https://api.namecheap.com/xml.response"' \
+                'get' \
+                'data-urlencode = "ApiUser=makeitworkcloud"' \
+                "data-urlencode = \"ApiKey=${escaped_api_key}\"" \
+                'data-urlencode = "UserName=makeitworkcloud"' \
+                "data-urlencode = \"ClientIp=${egress_ipv4}\"" \
+                'data-urlencode = "Command=namecheap.users.getPricing"' \
+                'data-urlencode = "ProductType=DOMAIN"'
+            } | curl -4 --disable --config - --fail --silent --show-error --max-time 20 --output "$response_file"; then
               if grep -q 'Status="OK"' "$response_file"; then
                 status=healthy
                 detail='Authenticated Namecheap API request succeeded.'
