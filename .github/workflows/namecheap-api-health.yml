@@ -43,6 +43,7 @@ jobs:
           status=failed
           detail='Namecheap API request did not complete.'
           egress_ipv4=''
+          namecheap_reported_ipv4=''
 
           for endpoint in https://ifconfig.me/ip https://checkip.amazonaws.com; do
             candidate="$(curl -4 --fail --silent --show-error --max-time 10 "$endpoint" | tr -d '\r\n')" || continue
@@ -78,11 +79,11 @@ jobs:
                 status=healthy
                 detail='Authenticated Namecheap API request succeeded.'
               elif grep -q 'Invalid request IP' "$response_file"; then
-                namecheap_ipv4="$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$response_file" | head -n 1 || true)"
-                if is_ipv4 "$namecheap_ipv4"; then
-                  egress_ipv4="$namecheap_ipv4"
+                candidate="$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$response_file" | head -n 1 || true)"
+                if is_ipv4 "$candidate"; then
+                  namecheap_reported_ipv4="$candidate"
                 fi
-                detail="Namecheap rejected egress IPv4 ${egress_ipv4}; update the manual Namecheap API allowlist."
+                detail="Namecheap rejected curl-observed egress IPv4 ${egress_ipv4}; update the manual Namecheap API allowlist."
               else
                 detail='Namecheap returned an unsuccessful API response.'
               fi
@@ -94,6 +95,7 @@ jobs:
           {
             echo "status=${status}"
             echo "egress_ipv4=${egress_ipv4}"
+            echo "namecheap_reported_ipv4=${namecheap_reported_ipv4}"
             echo "detail=${detail}"
           } >> "$GITHUB_OUTPUT"
 
@@ -103,12 +105,14 @@ jobs:
         env:
           HEALTH_STATUS: ${{ steps.health.outputs.status }}
           EGRESS_IPV4: ${{ steps.health.outputs.egress_ipv4 }}
+          NAMECHEAP_REPORTED_IPV4: ${{ steps.health.outputs.namecheap_reported_ipv4 }}
           HEALTH_DETAIL: ${{ steps.health.outputs.detail }}
         with:
           script: |
             const marker = '<!-- namecheap-api-health -->';
             const status = process.env.HEALTH_STATUS || 'failed';
             const egressIpv4 = process.env.EGRESS_IPV4 || 'unknown';
+            const namecheapReportedIpv4 = process.env.NAMECHEAP_REPORTED_IPV4;
             const detail = process.env.HEALTH_DETAIL || 'No health-check detail was captured.';
             const { owner, repo } = context.repo;
             const issues = await github.paginate(github.rest.issues.listForRepo, {
@@ -138,7 +142,8 @@ jobs:
               marker,
               '## Namecheap API health check failed',
               '',
-              `- Egress IPv4: \`${egressIpv4}\``,
+              `- curl -4 observed IPv4: \`${egressIpv4}\``,
+              ...(namecheapReportedIpv4 ? [`- Namecheap-reported IPv4: \`${namecheapReportedIpv4}\``] : []),
               `- Detail: ${detail}`,
               '',
               'This alert performs a read-only API check. It does not change Namecheap DNS, the API allowlist, or credentials.',
@@ -168,8 +173,12 @@ jobs:
         if: steps.health.outputs.status != 'healthy'
         env:
           EGRESS_IPV4: ${{ steps.health.outputs.egress_ipv4 }}
+          NAMECHEAP_REPORTED_IPV4: ${{ steps.health.outputs.namecheap_reported_ipv4 }}
           HEALTH_DETAIL: ${{ steps.health.outputs.detail }}
         run: |
-          echo "Observed IPv4: ${EGRESS_IPV4:-unknown}" >&2
+          echo "curl -4 observed IPv4: ${EGRESS_IPV4:-unknown}" >&2
+          if [ -n "${NAMECHEAP_REPORTED_IPV4:-}" ]; then
+            echo "Namecheap-reported IPv4: ${NAMECHEAP_REPORTED_IPV4}" >&2
+          fi
           echo "$HEALTH_DETAIL" >&2
           exit 1
