@@ -7,17 +7,16 @@ OpenTofu root that delegates the authoritative nameservers for `xnoto.dev` and `
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement_terraform) | > 1.3 |
-| <a name="requirement_cloudflare"></a> [cloudflare](#requirement_cloudflare) | ~> 5.0 |
-| <a name="requirement_namecheap"></a> [namecheap](#requirement_namecheap) | ~> 2.9 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | > 1.3 |
+| <a name="requirement_cloudflare"></a> [cloudflare](#requirement\_cloudflare) | ~> 5.0 |
+| <a name="requirement_namecheap"></a> [namecheap](#requirement\_namecheap) | ~> 2.9 |
 
 ## Providers
 
 | Name | Version |
 | ---- | ------- |
-| <a name="provider_cloudflare"></a> [cloudflare](#provider_cloudflare) | ~> 5.0 |
-| <a name="provider_namecheap"></a> [namecheap](#provider_namecheap) | ~> 2.9 |
-| <a name="provider_sops"></a> [sops](#provider_sops) | n/a |
+| <a name="provider_cloudflare"></a> [cloudflare](#provider\_cloudflare) | ~> 5.0 |
+| <a name="provider_namecheap"></a> [namecheap](#provider\_namecheap) | ~> 2.9 |
 
 ## Modules
 
