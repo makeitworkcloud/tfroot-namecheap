@@ -1,0 +1,126 @@
+name: namecheap-api-health
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: namecheap-api-health
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    name: Namecheap API allowlist health
+    runs-on: arc-tf
+    timeout-minutes: 2
+    steps:
+      - name: Check Namecheap API access
+        id: health
+        shell: bash
+        env:
+          NAMECHEAP_API_KEY: ${{ secrets.NAMECHEAP_API_KEY }}
+        run: |
+          set -uo pipefail
+
+          is_ipv4() {
+            local candidate="$1"
+            local octet
+            local -a octets
+            IFS='.' read -r -a octets <<< "$candidate"
+            [ "${#octets[@]}" -eq 4 ] || return 1
+            for octet in "${octets[@]}"; do
+              [[ "$octet" =~ ^[0-9]+$ ]] || return 1
+              (( 10#$octet <= 255 )) || return 1
+            done
+          }
+
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+          status=failed
+          detail='Namecheap API request did not complete.'
+          egress_ipv4=''
+          namecheap_reported_ipv4=''
+
+          for endpoint in https://ifconfig.me/ip https://checkip.amazonaws.com; do
+            candidate="$(curl -4 --fail --silent --show-error --max-time 10 "$endpoint" | tr -d '\r\n')" || continue
+            if is_ipv4 "$candidate"; then
+              egress_ipv4="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$egress_ipv4" ]; then
+            detail='Could not determine a valid IPv4 egress address.'
+          elif [ -z "${NAMECHEAP_API_KEY:-}" ]; then
+            detail='NAMECHEAP_API_KEY is unavailable to this workflow.'
+          else
+            escaped_api_key=${NAMECHEAP_API_KEY//\\/\\\\}
+            escaped_api_key=${escaped_api_key//\"/\\\"}
+            escaped_api_key=${escaped_api_key//$'\r'/\\r}
+            escaped_api_key=${escaped_api_key//$'\n'/\\n}
+
+            # Keep the API key out of process arguments by passing curl options on stdin.
+            if {
+              printf '%s\n' \
+                'url = "https://api.namecheap.com/xml.response"' \
+                'get' \
+                'data-urlencode = "ApiUser=makeitworkcloud"' \
+                "data-urlencode = \"ApiKey=${escaped_api_key}\"" \
+                'data-urlencode = "UserName=makeitworkcloud"' \
+                "data-urlencode = \"ClientIp=${egress_ipv4}\"" \
+                'data-urlencode = "Command=namecheap.users.getPricing"' \
+                'data-urlencode = "ProductType=DOMAIN"'
+            } | curl -4 --disable --config - --fail --silent --show-error --max-time 20 --retry 2 --retry-delay 2 --output "$response_file"; then
+              if grep -q 'Status="OK"' "$response_file"; then
+                status=healthy
+                detail='Authenticated Namecheap API request succeeded.'
+              elif grep -q 'Invalid request IP' "$response_file"; then
+                candidate="$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$response_file" | head -n 1 || true)"
+                if is_ipv4 "$candidate"; then
+                  namecheap_reported_ipv4="$candidate"
+                fi
+                detail="Namecheap rejected curl-observed egress IPv4 ${egress_ipv4}; update the manual Namecheap API allowlist."
+              else
+                detail='Namecheap returned an unsuccessful API response.'
+              fi
+            else
+              detail="Could not reach the Namecheap API from egress IPv4 ${egress_ipv4}."
+            fi
+          fi
+
+          {
+            echo "status=${status}"
+            echo "egress_ipv4=${egress_ipv4}"
+            echo "namecheap_reported_ipv4=${namecheap_reported_ipv4}"
+            echo "detail=${detail}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Report healthy check
+        if: steps.health.outputs.status == 'healthy'
+        env:
+          EGRESS_IPV4: ${{ steps.health.outputs.egress_ipv4 }}
+          HEALTH_DETAIL: ${{ steps.health.outputs.detail }}
+        run: |
+          echo "curl -4 observed IPv4: ${EGRESS_IPV4:-unknown}"
+          echo "$HEALTH_DETAIL"
+
+      - name: Fail unhealthy check
+        if: steps.health.outputs.status != 'healthy'
+        env:
+          EGRESS_IPV4: ${{ steps.health.outputs.egress_ipv4 }}
+          NAMECHEAP_REPORTED_IPV4: ${{ steps.health.outputs.namecheap_reported_ipv4 }}
+          HEALTH_DETAIL: ${{ steps.health.outputs.detail }}
+        run: |
+          echo "curl -4 observed IPv4: ${EGRESS_IPV4:-unknown}" >&2
+          if [ -n "${NAMECHEAP_REPORTED_IPV4:-}" ]; then
+            echo "Namecheap-reported IPv4: ${NAMECHEAP_REPORTED_IPV4}" >&2
+          fi
+          echo "$HEALTH_DETAIL" >&2
+          exit 1
