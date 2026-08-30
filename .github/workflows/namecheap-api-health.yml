@@ -8,6 +8,10 @@ on:
 permissions:
   issues: write
 
+concurrency:
+  group: namecheap-api-health
+  cancel-in-progress: false
+
 jobs:
   check:
     name: Namecheap API allowlist health
@@ -22,6 +26,18 @@ jobs:
         run: |
           set -uo pipefail
 
+          is_ipv4() {
+            local candidate="$1"
+            local octet
+            local -a octets
+            IFS='.' read -r -a octets <<< "$candidate"
+            [ "${#octets[@]}" -eq 4 ] || return 1
+            for octet in "${octets[@]}"; do
+              [[ "$octet" =~ ^[0-9]+$ ]] || return 1
+              (( 10#$octet <= 255 )) || return 1
+            done
+          }
+
           response_file="$(mktemp)"
           trap 'rm -f "$response_file"' EXIT
           status=failed
@@ -30,9 +46,18 @@ jobs:
 
           if [ -z "${NAMECHEAP_API_KEY:-}" ]; then
             detail='NAMECHEAP_API_KEY is unavailable to this workflow.'
-          elif egress_ipv4="$(curl -4 --fail --silent --show-error --max-time 10 https://checkip.amazonaws.com | tr -d '\r\n')" && \
-            [[ "$egress_ipv4" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-            if curl -4 --fail --silent --show-error --max-time 20 --get \
+          else
+            for endpoint in https://ifconfig.me/ip https://checkip.amazonaws.com; do
+              candidate="$(curl -4 --fail --silent --show-error --max-time 10 "$endpoint" | tr -d '\r\n')" || continue
+              if is_ipv4 "$candidate"; then
+                egress_ipv4="$candidate"
+                break
+              fi
+            done
+
+            if [ -z "$egress_ipv4" ]; then
+              detail='Could not determine a valid IPv4 egress address.'
+            elif curl -4 --fail --silent --show-error --max-time 20 --get \
               --data-urlencode 'ApiUser=makeitworkcloud' \
               --data-urlencode "ApiKey=${NAMECHEAP_API_KEY}" \
               --data-urlencode 'UserName=makeitworkcloud' \
@@ -45,6 +70,10 @@ jobs:
                 status=healthy
                 detail='Authenticated Namecheap API request succeeded.'
               elif grep -q 'Invalid request IP' "$response_file"; then
+                namecheap_ipv4="$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$response_file" | head -n 1 || true)"
+                if is_ipv4 "$namecheap_ipv4"; then
+                  egress_ipv4="$namecheap_ipv4"
+                fi
                 detail="Namecheap rejected egress IPv4 ${egress_ipv4}; update the manual Namecheap API allowlist."
               else
                 detail='Namecheap returned an unsuccessful API response.'
@@ -52,8 +81,6 @@ jobs:
             else
               detail="Could not reach the Namecheap API from egress IPv4 ${egress_ipv4}."
             fi
-          else
-            detail='Could not determine a valid IPv4 egress address.'
           fi
 
           {
@@ -76,26 +103,26 @@ jobs:
             const egressIpv4 = process.env.EGRESS_IPV4 || 'unknown';
             const detail = process.env.HEALTH_DETAIL || 'No health-check detail was captured.';
             const { owner, repo } = context.repo;
-            const { data: openIssues } = await github.rest.issues.listForRepo({
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
               owner,
               repo,
-              state: 'open',
+              state: 'all',
               per_page: 100,
             });
-            const existing = openIssues.find((issue) =>
+            const matchingIssues = issues.filter((issue) =>
               !issue.pull_request && issue.body?.includes(marker),
             );
 
             if (status === 'healthy') {
-              if (existing) {
-                await github.rest.issues.update({
+              await Promise.all(matchingIssues
+                .filter((issue) => issue.state === 'open')
+                .map((issue) => github.rest.issues.update({
                   owner,
                   repo,
-                  issue_number: existing.number,
+                  issue_number: issue.number,
                   state: 'closed',
                   state_reason: 'completed',
-                });
-              }
+                })));
               return;
             }
 
@@ -109,12 +136,14 @@ jobs:
               'This alert performs a read-only API check. It does not change Namecheap DNS, the API allowlist, or credentials.',
             ].join('\n');
             const title = 'Namecheap API health check failed';
+            const existing = matchingIssues.sort((left, right) => left.number - right.number)[0];
 
             if (existing) {
               await github.rest.issues.update({
                 owner,
                 repo,
                 issue_number: existing.number,
+                state: 'open',
                 title,
                 body,
               });
@@ -130,7 +159,9 @@ jobs:
       - name: Fail unhealthy check
         if: steps.health.outputs.status != 'healthy'
         env:
+          EGRESS_IPV4: ${{ steps.health.outputs.egress_ipv4 }}
           HEALTH_DETAIL: ${{ steps.health.outputs.detail }}
         run: |
+          echo "Observed IPv4: ${EGRESS_IPV4:-unknown}" >&2
           echo "$HEALTH_DETAIL" >&2
           exit 1
